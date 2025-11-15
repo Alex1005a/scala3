@@ -837,6 +837,14 @@ object Trees {
     def forwardTo: Tree[T] = tpt
   }
 
+  /** tpt forSome { tpDecls } */
+  case class ExistentialTypeTree[+T <: Untyped] private[ast](tpt: Tree[T], tpDecls: List[Tree[T]])(implicit @constructorOnly src: SourceFile)
+    extends ProxyTree[T] with TypTree[T] {
+    type ThisTree[+T <: Untyped] = ExistentialTypeTree[T]
+
+    def forwardTo: Tree[T] = tpt
+  }
+
   /** [typeparams] -> tpt
    *
    *  Note: the type of such a tree is not necessarily a `HKTypeLambda`, it can
@@ -1206,6 +1214,7 @@ object Trees {
     type SingletonTypeTree = Trees.SingletonTypeTree[T]
     type RefinedTypeTree = Trees.RefinedTypeTree[T]
     type AppliedTypeTree = Trees.AppliedTypeTree[T]
+    type ExistentialTypeTree = Trees.ExistentialTypeTree[T]
     type LambdaTypeTree = Trees.LambdaTypeTree[T]
     type TermLambdaTypeTree = Trees.TermLambdaTypeTree[T]
     type MatchTypeTree = Trees.MatchTypeTree[T]
@@ -1407,6 +1416,10 @@ object Trees {
         case tree: AppliedTypeTree if (tpt eq tree.tpt) && (args eq tree.args) => tree
         case _ => finalize(tree, untpd.AppliedTypeTree(tpt, args)(using sourceFile(tree)))
       }
+      def ExistentialTypeTree(tree: Tree)(tpt: Tree, tpDecls: List[Tree])(using Context): ExistentialTypeTree = tree match {
+        case tree: ExistentialTypeTree if (tpt eq tree.tpt) && (tpDecls eq tree.tpDecls) => tree
+        case _ => finalize(tree, untpd.ExistentialTypeTree(tpt, tpDecls)(using sourceFile(tree)))
+      }
       def LambdaTypeTree(tree: Tree)(tparams: List[TypeDef], body: Tree)(using Context): LambdaTypeTree = tree match {
         case tree: LambdaTypeTree if (tparams eq tree.tparams) && (body eq tree.body) => tree
         case _ => finalize(tree, untpd.LambdaTypeTree(tparams, body)(using sourceFile(tree)))
@@ -1593,6 +1606,8 @@ object Trees {
               cpy.RefinedTypeTree(tree)(transform(tpt), transformSub(refinements))
             case AppliedTypeTree(tpt, args) =>
               cpy.AppliedTypeTree(tree)(transform(tpt), transform(args))
+            case ExistentialTypeTree(tpt, tpDecls) =>
+              cpy.ExistentialTypeTree(tree)(transform(tpt), transform(tpDecls))
             case LambdaTypeTree(tparams, body) =>
               cpy.LambdaTypeTree(tree)(transformSub(tparams), transform(body))
             case TermLambdaTypeTree(params, body) =>
@@ -1740,6 +1755,8 @@ object Trees {
               this(this(x, tpt), refinements)
             case AppliedTypeTree(tpt, args) =>
               this(this(x, tpt), args)
+            case ExistentialTypeTree(tpt, tpDecls) =>
+              this(this(x, tpt), tpDecls)
             case LambdaTypeTree(tparams, body) =>
               inContext(localCtx(tree)) {
                 this(this(x, tparams), body)

@@ -875,6 +875,14 @@ object SpaceEngine {
    *  Also widen ExprType to its result type, and rewrap any annotation wrappers.
    *  For example, with `val opt = None`, widen `opt.type` to `None.type`. */
   def toUnderlying(tp: Type)(using Context): Type = trace(i"toUnderlying($tp ${tp.className})")(tp match {
+    case tp1 if tp1.widen.isInstanceOf[ExistentialType]                                  =>
+      tp1.widen match
+        case tp: ExistentialType =>
+          val leftr = tp1.findPrefix(tp)
+          if leftr.isStable && leftr.isValueType
+          then tp.unpack(leftr)
+          else tp1
+        case _ => tp1
     case _: ConstantType                            => tp
     case tp: TermRef if tp.symbol.is(Module)        => tp
     case tp: TermRef if tp.symbol.isAllOf(EnumCase) => tp

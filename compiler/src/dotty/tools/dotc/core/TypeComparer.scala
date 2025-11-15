@@ -2,31 +2,42 @@ package dotty.tools
 package dotc
 package core
 
-import Types.*, Contexts.*, Symbols.*, Flags.*, Names.*, NameOps.*, Denotations.*
+import Types.*
+import Contexts.*
+import Symbols.*
+import Flags.*
+import Names.*
+import NameOps.*
+import Denotations.*
 import Decorators.*
-import Phases.{gettersPhase, elimByNamePhase}
+import Phases.{elimByNamePhase, gettersPhase}
 import StdNames.nme
 import TypeOps.refineUsingParent
+
 import collection.mutable
-import util.{Stats, NoSourcePosition, EqHashMap}
+import util.{EqHashMap, NoSourcePosition, Stats}
 import config.Config
 import config.Feature.{migrateTo3, sourceVersion}
-import config.Printers.{subtyping, gadts, matchTypes, capt, noPrinter}
+import config.Printers.{capt, gadts, matchTypes, noPrinter, subtyping}
 import config.SourceVersion
-import TypeErasure.{erasedLub, erasedGlb}
+import TypeErasure.{erasedGlb, erasedLub}
 import TypeApplications.*
 import Variances.{Variance, variancesConform}
 import Constants.Constant
+
 import scala.util.control.NonFatal
-import typer.ProtoTypes.constrained
+import typer.ProtoTypes.{constrained, newTypeVar}
 import typer.Applications.productSelectorTypes
 import reporting.trace
-import annotation.constructorOnly
+
+import annotation.{constructorOnly, tailrec}
 import cc.*
 import Capabilities.Capability
 import NameKinds.WildcardParamName
 import MatchTypes.isConcrete
-import scala.util.boundary, boundary.break
+
+import scala.util.boundary
+import boundary.break
 
 /** Provides methods to compare types.
  */
@@ -644,6 +655,21 @@ class TypeComparer(@constructorOnly initctx: Context) extends ConstraintHandling
     def thirdTry: Boolean = tp2 match {
       case tp2 @ AppliedType(tycon2, args2) =>
         compareAppliedType2(tp2, tycon2, args2)
+      case tp2: ExistentialType =>
+        if tp1.isStable && tp1.isValueType
+        then {
+          tp1.widen match
+            case tp1: ExistentialType if ctx.isAfterTyper =>
+              tp1.parent <:< tp2.parent
+                && (tp1.syms.toSet == tp2.syms.toSet)
+                && tp1.tpDecls.forall((s, tp) => tp2.tpDecls.get(s).exists(tp <:< _))
+            case _ => false // this case should be handled in adaptToSubType
+        }
+        else
+          val freshCtx = ctx.fresh.setExploreTyperState()
+          inContext(freshCtx):
+            val instTp2 = tp2.instWithTypeVars
+            tryInstExistential <:< instTp2
       case tp2: NamedType =>
         thirdTryNamed(tp2)
       case tp2: TypeParamRef =>
@@ -926,6 +952,24 @@ class TypeComparer(@constructorOnly initctx: Context) extends ConstraintHandling
               foldOver(x, t)
 
       canWidenAbstract && acc(true, tp)
+
+    def tryUnpackExistential: Boolean = {
+      tp1.widen match
+        case tp: ExistentialType =>
+          val leftr = leftRoot.nn.findPrefix(tp)
+          if leftr.isStable && leftr.isValueType
+          then
+            val unpackedTp1 = tp.unpack(leftr)
+            unpackedTp1 <:< tp2
+          else fourthTry
+        case _ => fourthTry
+    }
+
+    def tryInstExistential(using Context): Type = {
+      tp1.widen match
+        case tp: ExistentialType => tp.instWithTypeVars
+        case _ => tp1
+    }
 
     def tryBaseType(cls2: Symbol) =
       val base = nonExprBaseType(tp1, cls2)
@@ -1447,6 +1491,7 @@ class TypeComparer(@constructorOnly initctx: Context) extends ConstraintHandling
                   tycon2.name.startsWith("Tuple")
                   && defn.isTupleNType(tp2)
                   && recur(tp1, tp2.toNestedPairs)
+                  || tryUnpackExistential
                   || tryBaseType(info2.cls)
                 case _ =>
                   fourthTry

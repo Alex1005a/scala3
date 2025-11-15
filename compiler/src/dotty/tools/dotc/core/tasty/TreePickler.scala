@@ -270,6 +270,9 @@ class TreePickler(pickler: TastyPickler, attributes: Attributes) {
         pickleType(tpe.parent)
         pickleType(tpe.refinedInfo, richTypes = true)
       }
+    case tpe: ExistentialType =>
+      writeByte(EXISTENTIALtype)
+      // TODO
     case tpe: RecType =>
       writeByte(RECtype)
       pickleType(tpe.parent)
@@ -735,6 +738,14 @@ class TreePickler(pickler: TastyPickler, attributes: Attributes) {
               refinements.foreach(preRegister)
               withLength { pickleTree(parent); refinements.foreach(pickleTree) }
             else pickleErrorType()
+          }
+        case ExistentialTypeTree(parent, tpDecls) =>
+          if (tpDecls.isEmpty) pickleTree(parent)
+          else {
+            if passesConditionForErroringBestEffortCode(tpDecls.head.symbol.exists) then {
+              writeByte(FORSOMEtpt)
+              // TODO
+            } else pickleErrorType()
           }
         case AppliedTypeTree(tycon, args) =>
           writeByte(APPLIEDtpt)

@@ -2139,6 +2139,11 @@ class Typer(@constructorOnly nestingLevel: Int = 0) extends Namer
         val rawSelectorTpe = fullyDefinedType(sel1.tpe, "pattern selector", tree.srcPos)
         val selType = rawSelectorTpe match
           case c: ConstantType if tree.isInline => c
+          case tref: TermRef =>
+            val tp = tref.widen
+            tp match
+              case tp: ExistentialType => tp.unpack(tref)
+              case tp => tp
           case otherTpe => otherTpe.widen
 
         /** Does `tree` has the same shape as the given match type?
@@ -2620,6 +2625,13 @@ class Typer(@constructorOnly nestingLevel: Int = 0) extends Namer
       if (member.isOverloaded)
         report.error(OverloadInRefinement(rsym), refinement.srcPos)
     assignType(cpy.RefinedTypeTree(tree)(tpt1, refinements1), tpt1, refinements1, refineCls)
+  }
+
+  def typedExistentialTypeTree(tree: untpd.ExistentialTypeTree)(using Context): TypTree = {
+    index(tree.tpDecls)
+    val tpDecls1 = tree.tpDecls.map(typed(_))
+    val tpt1 = if tree.tpt == EmptyTree then TypeTree(defn.ObjectType) else typedAheadType(tree.tpt)
+    assignType(cpy.ExistentialTypeTree(tree)(tpt1, tpDecls1), tpt1, tpDecls1)
   }
 
   def typedAppliedTypeTree(tree: untpd.AppliedTypeTree)(using Context): Tree = {
@@ -3731,6 +3743,7 @@ class Typer(@constructorOnly nestingLevel: Int = 0) extends Namer
           case tree: untpd.SingletonTypeTree => typedSingletonTypeTree(tree)
           case tree: untpd.RefinedTypeTree => typedRefinedTypeTree(tree)
           case tree: untpd.AppliedTypeTree => typedAppliedTypeTree(tree)
+          case tree: untpd.ExistentialTypeTree => typedExistentialTypeTree(tree)(using ctx.localContext(tree, NoSymbol).setNewScope)
           case tree: untpd.LambdaTypeTree => typedLambdaTypeTree(tree)(using ctx.localContext(tree, NoSymbol).setNewScope)
           case tree: untpd.TermLambdaTypeTree => typedTermLambdaTypeTree(tree)(using ctx.localContext(tree, NoSymbol).setNewScope)
           case tree: untpd.MatchTypeTree => typedMatchTypeTree(tree, pt)
@@ -4812,6 +4825,30 @@ class Typer(@constructorOnly nestingLevel: Int = 0) extends Namer
       case tree: Closure => cpy.Closure(tree)(tpt = TypeTree(samParent)).withType(samParent)
     }
 
+    def existentialCompat(tp: Type, pt: Type)(using Context): Type =
+      pt.dealias match {
+        case pt: ExistentialType =>
+          val freshCtx = ctx.fresh.setExploreTyperState()
+          inContext(freshCtx):
+            val tvars = pt.declsList.map {
+              case (s, tp: TypeBounds) => newTypeVar(tp, s.name.toTypeName)
+              case (s, _) => newTypeVar(TypeBounds.empty, s.name.toTypeName)
+            }
+            val instPt = pt.parent.subst(pt.syms, tvars)
+            val res = tp <:< instPt
+            if (!res) tp
+            else {
+              ExistentialType(
+                pt.parent,
+                pt.syms.lazyZip(tvars).map((s, tvar) =>
+                  val tp = freshCtx.typerState.constraint.entry(tvar.origin)
+                  s -> TypeAlias(tp.loBound)
+                ).toMap
+              )
+            }
+        case _ => tp
+      }
+
     def adaptToSubType(wtp: Type): Tree =
       // try converting a constant to the target type
       tree.tpe.widenTermRefExpr.normalized match
@@ -4826,6 +4863,10 @@ class Typer(@constructorOnly nestingLevel: Int = 0) extends Namer
               report.warning(LossyWideningConstantConversion(x.tpe, pt), tree.srcPos)
             return readapt(adaptConstant(tree, ConstantType(converted)))
         case _ =>
+
+      val existential = existentialCompat(tree.tpe.widenExpr, pt)
+      if (existential `ne` tree.tpe.widenExpr)
+        return readapt(tree.cast(existential))
 
       val captured = captureWildcardsCompat(wtp, pt)
       if (captured `ne` wtp)

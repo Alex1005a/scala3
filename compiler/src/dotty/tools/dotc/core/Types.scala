@@ -5,7 +5,8 @@ package core
 import Symbols.*
 import Flags.*
 import Names.*
-import StdNames.*, NameOps.*
+import StdNames.*
+import NameOps.*
 import NullOpsDecorator.*
 import NameKinds.{SkolemName, WildcardParamName}
 import Scopes.*
@@ -18,7 +19,7 @@ import Decorators.*
 import Denotations.*
 import Periods.*
 import CheckRealizable.*
-import Variances.{Variance, setStructuralVariances, Invariant}
+import Variances.{Invariant, Variance, setStructuralVariances}
 import typer.Nullables
 import util.Stats.*
 import util.{SimpleIdentityMap, SimpleIdentitySet}
@@ -28,19 +29,23 @@ import printing.Texts.*
 import printing.Printer
 import Hashable.*
 import Uniques.*
+
 import collection.mutable
 import config.Config
 import config.Feature.sourceVersion
 import config.SourceVersion
-import annotation.{tailrec, constructorOnly}
-import scala.util.hashing.{ MurmurHash3 => hashing }
-import config.Printers.{core, typr, matchTypes}
-import reporting.{trace, Message}
+
+import annotation.{constructorOnly, tailrec}
+import scala.util.hashing.MurmurHash3 as hashing
+import config.Printers.{core, matchTypes, typr}
+import reporting.{Message, trace}
+
 import java.lang.ref.WeakReference
 import compiletime.uninitialized
 import cc.*
 import CaptureSet.IdentityCaptRefMap
 import Capabilities.*
+import dotty.tools.dotc.typer.ProtoTypes.newTypeVar
 
 import scala.annotation.internal.sharable
 import scala.annotation.threadUnsafe
@@ -846,6 +851,16 @@ object Types extends TypeUtils {
           goThis(tp)
         case tp: RefinedType =>
           if (name eq tp.refinedName) goRefined(tp) else go(tp.parent)
+        case tp: ExistentialType =>
+          tp.tpDecls.map((s, tp) => (s.name, tp)).get(name) match
+            case Some(memberTp) => goExistential(tp)(memberTp)
+            case None =>
+              val leftr = pre.findPrefix(tp)
+              if leftr.isStable && leftr.isValueType
+              then
+                val unpackedTp = tp.unpack(leftr)
+                findMember(name, unpackedTp, required, excluded)
+              else go(tp.parent)
         case tp: RecType =>
           goRec(tp)
         case tp: TypeParamRef =>
@@ -894,6 +909,23 @@ object Types extends TypeUtils {
           try go(rt.parent).mapInfo(_.substRecThis(rt, pre))
           finally rt.openedWithPrefix = NoType
       end goRec
+
+      def goExistential(tp: ExistentialType)(memberTp: Type) = {
+        val pdenot = go(tp.parent)
+        val pinfo = pdenot.info
+        val dinfo = memberTp
+        if (name.isTypeName && !pinfo.isInstanceOf[ClassInfo]) {
+          val jointInfo =
+            if dinfo.isInstanceOf[TypeAlias] && !ctx.mode.is(Mode.CheckBoundsOrSelfType) then
+              dinfo
+            else if ctx.base.pendingMemberSearches.contains(name) then
+              pinfo safe_& dinfo
+            else
+              pinfo recoverable_& dinfo
+          pdenot.asSingleDenotation.derivedSingleDenotation(pdenot.symbol, jointInfo)
+        }
+        else pdenot.asSingleDenotation.derivedSingleDenotation(pdenot.symbol, dinfo)
+      }
 
       def goRefined(tp: RefinedType) = {
         val pdenot = go(tp.parent)
@@ -1718,6 +1750,14 @@ object Types extends TypeUtils {
       case _ => NoType
     }
 
+    @tailrec
+    final def findPrefix(tp: Type, proxy: Type = this)(using Context): Type = {
+      proxy.underlyingIfProxy.dealias match
+        case under if under eq tp => proxy
+        case under if under eq proxy => proxy
+        case under => findPrefix(tp, under)
+    }
+
     /** If this is a repeated type, its element type, otherwise the type itself */
     def repeatedToSingle(using Context): Type = this match {
       case tp @ ExprType(tp1) => tp.derivedExprType(tp1.repeatedToSingle)
@@ -1745,6 +1785,12 @@ object Types extends TypeUtils {
      */
     def lookupRefined(name: Name)(using Context): Type =
       @tailrec def loop(pre: Type): Type = pre match
+        case pre: ExistentialType =>
+          pre.tpDecls.map((s, tp) => s.name -> tp).get(name) match {
+            case Some(tp: AliasingBounds) => tp.alias
+            case Some(tp: SingletonType) => tp
+            case _ => loop(pre.parent)
+          }
         case pre: RefinedType =>
           pre.refinedInfo match {
             case tp: AliasingBounds =>
@@ -3237,6 +3283,50 @@ object Types extends TypeUtils {
   }
   object LazyRef:
     def of(refFn: Context ?=> (Type | Null)): LazyRef = LazyRef(refFn(using _))
+
+  /** A existential type parent { tpDecls }
+   */
+  abstract case class ExistentialType(parent: Type, tpDecls: Map[Symbol, Type]) extends CachedProxyType with ValueType {
+
+    lazy val declsList = tpDecls.toList
+    lazy val syms = declsList.map(_._1)
+    lazy val types = declsList.map(_._2)
+
+    override def underlying(using Context): Type = {
+      parent.subst(syms, types)
+    }
+
+    override def computeHash(bs: Binders): Int = doHash(bs, tpDecls.values.toList, parent, tpDecls.values.toList)
+
+    final def derivedExistentialType
+      (parent: Type = this.parent, decls: Map[Symbol, Type] = this.tpDecls)
+      (using Context): Type =
+        if ((parent eq this.parent) && (decls eq this.tpDecls)) this
+        else ExistentialType(parent, decls)
+
+    final def instWithTypeVars(using Context): Type = {
+      val tvars = declsList.map {
+        case (s, tp: TypeBounds) => newTypeVar(tp, s.name.toTypeName)
+        case (s, _) => newTypeVar(TypeBounds.empty, s.name.toTypeName)
+      }
+      parent.subst(syms, tvars)
+    }
+
+    final def unpack(leftr: Type)(using Context): Type = {
+      parent.subst(syms, syms.map(s => TypeRef(leftr, s.name)))
+    }
+
+  }
+
+  class CachedExistentialType(parent: Type, decls: Map[Symbol, Type])
+    extends ExistentialType(parent, decls)
+  
+  object ExistentialType {
+    def apply(parent: Type, decls: Map[Symbol, Type])(using Context): ExistentialType = {
+      assert(!ctx.erasedTypes)
+      unique(new CachedExistentialType(parent, decls))
+    }
+  }
 
   // --- Refined Type and RecType ------------------------------------------------
 
@@ -6479,6 +6569,9 @@ object Types extends TypeUtils {
         case tp: RecType =>
           record("TypeMap.RecType")
           derivedRecType(tp, this(tp.parent))
+
+        case tp: ExistentialType =>
+          tp.derivedExistentialType(this(tp.parent), tp.tpDecls.map((s, tp) => s -> this(tp)))
 
         case tp @ SuperType(thistp, supertp) =>
           derivedSuperType(tp, this(thistp), this(supertp))

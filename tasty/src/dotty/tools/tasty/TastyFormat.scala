@@ -630,6 +630,9 @@ object TastyFormat {
   final val MATCHCASEtype = 192
   final val FLEXIBLEtype = 193
 
+  final val FORSOMEtpt = 194
+  final val EXISTENTIALtype = 195
+
   final val HOLE = 255
 
   // Attributes tags

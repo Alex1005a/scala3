@@ -502,6 +502,14 @@ trait TypeAssigner {
     tree.withType(RecType.closeOver(rt => refined.substThis(refineCls, rt.recThis)))
   }
 
+  def assignType(tree: untpd.ExistentialTypeTree, parent: Tree, tpDecls: List[Tree])(using Context): ExistentialTypeTree = {
+    val decls = tpDecls.map { tpDecl =>
+      val rsym = tpDecl.symbol
+      (rsym, rsym.info)
+    }.toMap
+    tree.withType(ExistentialType(parent.tpe, decls))
+  }
+
   def assignType(tree: untpd.AppliedTypeTree, tycon: Tree, args: List[Tree])(using Context): AppliedTypeTree = {
     assert(!hasNamedArg(args) || ctx.reporter.errorsReported, tree)
     val tparams = tycon.tpe.typeParams

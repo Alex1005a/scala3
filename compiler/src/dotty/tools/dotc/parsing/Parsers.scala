@@ -1716,8 +1716,8 @@ object Parsers {
         case MATCH =>
           matchType(t)
         case FORSOME =>
-          syntaxError(ExistentialTypesNoLongerSupported())
-          t
+          in.nextToken()
+          existentialTypeRest(t)
         case _ if isPureArrow =>
           erasedArgs.addOne(false)
           functionRest(t :: Nil)
@@ -1899,6 +1899,16 @@ object Parsers {
           if in.token == LBRACE
           then makeRetaining(t, captureSet(), tpnme.retains)
           else makeRetaining(t, Nil, tpnme.retainsCap)
+      else
+        t
+    }
+
+    def existentialTypeRest(t: Tree): Tree = {
+      argumentStart()
+      if in.isNestedStart then
+        existentialTypeRest(atSpan(startOffset(t)) {
+          ExistentialTypeTree(rejectWildcardType(t), refinement(indentOK = true))
+        })
       else
         t
     }
